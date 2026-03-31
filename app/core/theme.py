@@ -1,0 +1,54 @@
+"""Theme constants for IA Workspace — colors, fonts, and styling."""
+
+
+# Primary palette
+NAVY_BLUE = "#1B2A4A"
+SLATE_GRAY = "#64748B"
+WHITE = "#FFFFFF"
+ACCENT_BLUE = "#3B82F6"
+SUCCESS_GREEN = "#22C55E"
+ERROR_RED = "#EF4444"
+
+# Extended palette
+LIGHT_GRAY = "#F1F5F9"
+BORDER_GRAY = "#E2E8F0"
+HOVER_BLUE = "#2563EB"
+SIDEBAR_BG = "#0F1A2E"
+SIDEBAR_HOVER = "#1E3A5F"
+SIDEBAR_ACTIVE = "#253D5B"
+TEXT_PRIMARY = "#1E293B"
+TEXT_SECONDARY = "#64748B"
+TEXT_MUTED = "#94A3B8"
+DISABLED_BG = "#F8FAFC"
+DISABLED_TEXT = "#CBD5E1"
+
+# Fonts (system default — Segoe UI on Windows)
+FONT_FAMILY = "Segoe UI"
+FONT_SIZE_SMALL = 11
+FONT_SIZE_NORMAL = 12
+FONT_SIZE_LARGE = 14
+FONT_SIZE_TITLE = 18
+FONT_SIZE_HEADING = 16
+
+# Window
+WINDOW_MIN_WIDTH = 1100
+WINDOW_MIN_HEIGHT = 700
+SIDEBAR_WIDTH = 220
+SIDEBAR_COLLAPSED_WIDTH = 60
+
+# Sizing
+PADDING_SMALL = 4
+PADDING_NORMAL = 8
+PADDING_LARGE = 16
+PADDING_XLARGE = 24
+CORNER_RADIUS = 8
+BUTTON_HEIGHT = 36
+BUTTON_CORNER_RADIUS = 6
+
+# App info
+APP_NAME = "Internal Audit Workspace"
+APP_SHORT_NAME = "IA Workspace"
+APP_ORG = "Agung Sedayu Group"
+APP_VERSION = "1.0.0"
+APP_DEVELOPER = "Kairos Abinaya Susanto"
+APP_SECURITY_MSG = "All processing is done locally. No data leaves your machine."
