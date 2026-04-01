@@ -301,12 +301,18 @@ def _try_parse_date(s: str) -> Optional[datetime]:
 def _datetime_to_serial(dt: datetime) -> float:
     """Convert a datetime to an Excel serial date number.
 
-    Uses the same epoch (1899-12-30) as openpyxl, which inherently
-    compensates for the Lotus 1-2-3 leap-year bug for modern dates.
-    No manual +1 correction needed.
+    Uses the same epoch (1899-12-30) as openpyxl.  For dates before
+    1-Mar-1900 we subtract 1 to compensate for Excel's fictional
+    29-Feb-1900 (the Lotus 1-2-3 leap-year bug).
     """
     delta = dt - _EXCEL_EPOCH
-    return delta.days + delta.seconds / 86400.0
+    serial = delta.days + delta.seconds / 86400.0
+    # Excel counts the fictional 29-Feb-1900 as day 60.  For dates
+    # 1-Jan-1900 through 28-Feb-1900 (Python serial 2..60) the raw
+    # calculation is 1 too high; subtract 1 to align with Excel.
+    if serial < 60:
+        serial -= 1
+    return serial
 
 
 def _convert_date_cell(cell_el, shared_strings: List[str]) -> None:
