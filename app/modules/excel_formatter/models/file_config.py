@@ -27,6 +27,7 @@ class FileConfig:
     file_path: str
     file_name: str
     file_size: str  # Human-readable
+    relative_dir: str = ""  # Subdirectory relative to output folder (preserves folder structure)
     sheet_configs: Dict[str, SheetConfig] = field(default_factory=dict)
     date_format: str = "DD-MMM-YY"
     separator_style: str = ","  # "," = 1,000.00 | "." = 1.000,00

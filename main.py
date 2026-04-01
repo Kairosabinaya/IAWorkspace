@@ -1,5 +1,6 @@
 """Entry point for Internal Audit Workspace."""
 
+import multiprocessing
 import sys
 import os
 
@@ -22,4 +23,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # Required for Nuitka/frozen builds
     main()

@@ -87,12 +87,43 @@ def _analyze_sheet(ws: Worksheet) -> SheetConfig:
     data_start = header_row_idx  # 0-based index of first data row in `rows`
     data_rows = rows[data_start: data_start + EXCEL_SAMPLE_ROWS]
 
+    # Identify columns that are empty in the initial sample so we can
+    # scan deeper into the sheet for non-blank data.
+    _empty_col_indices: List[int] = []
+    _col_cells_cache: Dict[int, list] = {}  # col_idx -> cells from initial sample
+
+    for col_idx in range(num_cols):
+        cells = [r[col_idx] for r in data_rows if col_idx < len(r)]
+        _col_cells_cache[col_idx] = cells
+        if not any(c.value is not None for c in cells):
+            _empty_col_indices.append(col_idx)
+
+    # Deep-scan for columns that appeared empty in the first sample.
+    # Read further rows (up to 2000 beyond the initial sample) to find data.
+    if _empty_col_indices:
+        _DEEP_SCAN_ROWS = 2000
+        deep_start = 1 + data_start + EXCEL_SAMPLE_ROWS  # 1-based min_row
+        deep_rows = []
+        for i, row in enumerate(
+            ws.iter_rows(min_row=deep_start), start=1,
+        ):
+            deep_rows.append(row)
+            if i >= _DEEP_SCAN_ROWS:
+                break
+
+        for col_idx in _empty_col_indices:
+            extra_cells = [r[col_idx] for r in deep_rows if col_idx < len(r)]
+            non_empty = [c for c in extra_cells if c.value is not None]
+            if non_empty:
+                # Replace the all-blank sample with non-blank cells we found
+                _col_cells_cache[col_idx] = non_empty[:EXCEL_SAMPLE_ROWS]
+
     for col_idx in range(num_cols):
         header_cell = header_cells[col_idx]
         header_name = str(header_cell.value).strip() if header_cell.value is not None else ""
         letter = get_column_letter(col_idx + 1)
 
-        col_data_cells = [r[col_idx] for r in data_rows if col_idx < len(r)]
+        col_data_cells = _col_cells_cache[col_idx]
         col_values = [c.value for c in col_data_cells if c.value is not None]
 
         ci = ColumnInfo(

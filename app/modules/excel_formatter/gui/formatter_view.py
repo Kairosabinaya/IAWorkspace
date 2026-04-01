@@ -2,9 +2,7 @@
 
 import os
 import subprocess
-import threading
-import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -12,7 +10,7 @@ import customtkinter as ctk
 
 from app.core import theme
 from app.modules.excel_formatter.engine.analyzer import analyze_file
-from app.modules.excel_formatter.engine.processor import process_file
+from app.modules.excel_formatter.engine.format_queue import FormattingQueue
 from app.modules.excel_formatter.gui.config_dialog import ConfigDialog
 from app.modules.excel_formatter.gui.file_list_panel import FileListPanel
 from app.modules.excel_formatter.gui.progress_panel import ProgressPanel
@@ -27,14 +25,18 @@ class FormatterView(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._files: dict[str, FileConfig] = {}  # path -> config
         self._output_folder: str = ""
-        self._processing = False
+        self._file_relative_dirs: dict[str, str] = {}  # path -> relative subdir
+
+        # Analysis pool (unchanged — works well)
         self._analysis_pool = ThreadPoolExecutor(max_workers=4)
         self._analysis_futures: dict[str, Future] = {}
         self._poll_active = False
 
-        # Throttled progress state — prevents UI event queue flooding
-        self._progress_state: dict[str, tuple[float, str]] = {}  # file_name -> (pct, text)
+        # Formatting queue (replaces old _processing flag + thread pool)
+        self._format_queue = FormattingQueue()
         self._progress_poll_active = False
+        # Track whether we already showed the "idle" summary for this batch
+        self._idle_notified = True
 
         self._build_ui()
 
@@ -61,13 +63,13 @@ class FormatterView(ctk.CTkFrame):
         ).pack(pady=(0, 4))
 
         ctk.CTkLabel(
-            drop_inner, text="Drag & Drop Excel Files Here",
+            drop_inner, text="Select Excel Files or Folder",
             font=(theme.FONT_FAMILY, theme.FONT_SIZE_LARGE),
             text_color=theme.TEXT_SECONDARY,
         ).pack(pady=(0, 2))
 
         ctk.CTkLabel(
-            drop_inner, text="or click Browse to select files or a folder",
+            drop_inner, text="Click Browse to select files or a folder to format",
             font=(theme.FONT_FAMILY, theme.FONT_SIZE_SMALL),
             text_color=theme.TEXT_MUTED,
         ).pack(pady=(0, 8))
@@ -94,7 +96,8 @@ class FormatterView(ctk.CTkFrame):
             command=self._browse_folder,
         ).pack(side="left")
 
-        self._setup_dnd()
+        # Drag-and-drop disabled for now (windnd thread-safety issues)
+        # self._setup_dnd()
 
         # Middle: file list + settings side by side
         mid = ctk.CTkFrame(self, fg_color="transparent")
@@ -215,19 +218,38 @@ class FormatterView(ctk.CTkFrame):
             import windnd
 
             def _on_drop(file_list):
-                paths = []
-                for f in file_list:
-                    raw = f.decode("utf-8") if isinstance(f, bytes) else str(f)
-                    p = Path(raw)
-                    if p.is_dir():
-                        paths.extend(str(x) for x in p.glob("**/*.xlsx"))
-                    else:
-                        paths.append(raw)
-                self.after(0, lambda: self._add_files(paths))
+                # windnd callback runs on a background thread — decode paths
+                # here (lightweight) and defer all I/O to the main thread.
+                raw_paths: list[str] = []
+                try:
+                    for f in file_list:
+                        raw = f.decode("utf-8") if isinstance(f, bytes) else str(f)
+                        raw_paths.append(raw)
+                except Exception:
+                    pass
+                if raw_paths:
+                    self.after(0, lambda: self._process_dropped_paths(raw_paths))
 
             windnd.hook_dropfiles(self.winfo_toplevel(), func=_on_drop)
         except ImportError:
             pass
+
+    def _process_dropped_paths(self, raw_paths: list[str]):
+        """Resolve dropped paths on the main thread (safe for I/O + UI)."""
+        paths: list[str] = []
+        roots: dict[str, str] = {}
+        for raw in raw_paths:
+            p = Path(raw)
+            if p.is_dir():
+                root = str(p)
+                for x in p.glob("**/*.xlsx"):
+                    fp = str(x)
+                    paths.append(fp)
+                    roots[fp] = root
+            else:
+                paths.append(raw)
+        if paths:
+            self._add_files(paths, roots=roots)
 
     def _browse_files(self):
         paths = filedialog.askopenfilenames(
@@ -248,14 +270,25 @@ class FormatterView(ctk.CTkFrame):
                 "No .xlsx files were found in the selected folder.",
             )
             return
-        self._add_files([str(f) for f in xlsx_files])
+        self._add_files([str(f) for f in xlsx_files], root_folder=folder)
 
     # ------------------------------------------------------------------
     # File management — batched UI updates to prevent freeze
     # ------------------------------------------------------------------
 
-    def _add_files(self, paths: list[str]):
-        """Validate extension (instant), then add files in batches to avoid freeze."""
+    def _add_files(
+        self,
+        paths: list[str],
+        root_folder: str = "",
+        roots: dict[str, str] | None = None,
+    ):
+        """Validate extension (instant), then add files in batches to avoid freeze.
+
+        Args:
+            paths: List of file paths.
+            root_folder: Common root folder (from Browse Folder).
+            roots: Per-file root folders (from drag-drop with mixed sources).
+        """
         valid = []
         rejected = []
         for p in paths:
@@ -275,8 +308,24 @@ class FormatterView(ctk.CTkFrame):
         if not valid:
             return
 
+        # Compute relative subdirectory for each file (preserves folder structure)
+        for p in valid:
+            root = (roots or {}).get(p, root_folder)
+            rel = ""
+            if root:
+                rel = os.path.relpath(os.path.dirname(p), root)
+                if rel == ".":
+                    rel = ""
+            self._file_relative_dirs[p] = rel
+
         if not self._output_folder:
-            self._output_folder = get_default_output_folder(valid[0])
+            # Use the root folder (if available) for a cleaner output base
+            first_root = (roots or {}).get(valid[0], root_folder)
+            if first_root:
+                from app.utils.constants import DEFAULT_OUTPUT_FOLDER
+                self._output_folder = str(Path(first_root) / DEFAULT_OUTPUT_FOLDER)
+            else:
+                self._output_folder = get_default_output_folder(valid[0])
             self._output_var.set(self._output_folder)
 
         # Add files in batches of 5 via after() to keep UI responsive
@@ -294,9 +343,11 @@ class FormatterView(ctk.CTkFrame):
                 file_name=os.path.basename(path),
                 file_size="...",
                 status="Analyzing...",
+                relative_dir=self._file_relative_dirs.get(path, ""),
             )
             self._files[path] = placeholder
             self._file_list.add_file(placeholder)
+            self._file_list.set_file_buttons_state(path, "analyzing")
             future = self._analysis_pool.submit(analyze_file, path)
             self._analysis_futures[path] = future
 
@@ -330,10 +381,15 @@ class FormatterView(ctk.CTkFrame):
             self._poll_active = False
 
     def _on_analysis_done(self, path: str, config: FileConfig):
+        # Preserve relative_dir computed during _add_files
+        old = self._files.get(path)
+        if old and old.relative_dir:
+            config.relative_dir = old.relative_dir
         self._files[path] = config
         config.status = "Ready"
         self._file_list.update_file_status(path, "Ready")
         self._file_list.update_file_details(config)
+        self._file_list.set_file_buttons_state(path, "ready")
 
     def _on_analysis_error(self, path: str, error: str):
         cfg = self._files.get(path)
@@ -341,21 +397,45 @@ class FormatterView(ctk.CTkFrame):
             cfg.status = "Error"
             cfg.error_message = error
         self._file_list.update_file_status(path, f"Error: {error}")
+        self._file_list.set_file_buttons_state(path, "error")
 
     def _remove_file(self, path: str):
+        # If queued, cancel it first
+        if self._format_queue.is_job_active(path):
+            if self._format_queue.is_job_processing(path):
+                messagebox.showwarning(
+                    "Cannot Remove",
+                    "This file is currently being formatted and cannot be removed.",
+                )
+                return
+            self._format_queue.cancel(path)
+            self._progress_panel.remove_file(os.path.basename(path))
+
         self._files.pop(path, None)
         self._file_list.remove_file(path)
 
     def _clear_all(self):
+        if not self._format_queue.is_idle():
+            if not messagebox.askyesno(
+                "Formatting in Progress",
+                "Formatting is in progress. Clear all files and cancel "
+                "queued items?\n\n(The file currently being formatted will "
+                "finish processing.)",
+            ):
+                return
+
+        self._format_queue.cancel_all_queued()
         for future in self._analysis_futures.values():
             future.cancel()
         self._analysis_futures.clear()
         self._pending_paths = []
         self._files.clear()
+        self._file_relative_dirs.clear()
         self._file_list.clear_all()
         self._progress_panel.hide()
 
     def destroy(self):
+        self._format_queue.shutdown()
         self._analysis_pool.shutdown(wait=False, cancel_futures=True)
         super().destroy()
 
@@ -385,13 +465,11 @@ class FormatterView(ctk.CTkFrame):
             self._output_var.set(folder)
 
     # ------------------------------------------------------------------
-    # Processing — throttled progress to prevent UI flooding
+    # Formatting — queue-based
     # ------------------------------------------------------------------
 
     def _format_single(self, file_path: str):
-        """Format a single file."""
-        if self._processing:
-            return
+        """Enqueue a single file for formatting."""
         config = self._files.get(file_path)
         if not config or not config.analyzed:
             messagebox.showinfo("Please Wait", "File is still being analyzed.")
@@ -412,43 +490,17 @@ class FormatterView(ctk.CTkFrame):
                 return
 
         config.freeze_pane = self._freeze_var.get()
-        config.status = "Processing..."
-        self._processing = True
-        self._format_btn.configure(state="disabled")
-        self._file_list.set_buttons_enabled(False)
-        self._progress_panel.show([config.file_name])
-
-        threading.Thread(
-            target=self._process_single_bg,
-            args=(file_path, config, self._output_folder),
-            daemon=True,
-        ).start()
-        self._start_progress_polling()
-
-    def _process_single_bg(self, file_path: str, config: FileConfig,
-                           output_folder: str):
-        def progress_cb(file_name, pct, text):
-            self._progress_state[file_name] = (pct, text)
-
-        try:
-            process_file(config, output_folder, progress_cb)
-        except Exception as exc:
-            config.status = "Error"
-            config.error_message = str(exc)
-
-        self.after(0, self._on_all_done)
+        self._enqueue_file(file_path, config)
 
     def _start_formatting(self):
-        """Format all ready files."""
-        if self._processing:
-            return
-
+        """Enqueue all ready files for formatting."""
         ready_files = {
             p: c for p, c in self._files.items()
-            if c.analyzed and c.status == "Ready"
+            if c.analyzed and c.status in ("Ready",)
         }
         if not ready_files:
-            messagebox.showinfo("Nothing to Process", "Add some Excel files first.")
+            messagebox.showinfo("Nothing to Process",
+                                "No ready files to format. Add some Excel files first.")
             return
 
         if not self._output_folder:
@@ -471,100 +523,88 @@ class FormatterView(ctk.CTkFrame):
                     return
 
         freeze = self._freeze_var.get()
-        for c in ready_files.values():
-            c.freeze_pane = freeze
-            c.status = "Processing..."
+        for path, config in ready_files.items():
+            config.freeze_pane = freeze
+            self._enqueue_file(path, config)
 
-        self._processing = True
-        self._format_btn.configure(state="disabled")
-        self._file_list.set_buttons_enabled(False)
-
-        file_names = [c.file_name for c in ready_files.values()]
-        self._progress_panel.show(file_names)
-
-        threading.Thread(
-            target=self._process_all,
-            args=(ready_files, self._output_folder),
-            daemon=True,
-        ).start()
+    def _enqueue_file(self, file_path: str, config: FileConfig):
+        """Add one file to the formatting queue and update UI."""
+        self._format_queue.enqueue(config, self._output_folder)
+        self._file_list.update_file_status(file_path, "Queued")
+        self._file_list.set_file_buttons_state(file_path, "queued")
+        self._progress_panel.add_file(config.file_name)
+        self._idle_notified = False
         self._start_progress_polling()
-
-    def _process_all(self, files: dict[str, FileConfig], output_folder: str):
-        """Run in background thread. Progress is written to _progress_state dict
-        (thread-safe) and read by the UI polling loop — never calls self.after()
-        directly, which prevents event queue flooding."""
-
-        def progress_cb(file_name, pct, text):
-            # Just write to shared dict — UI polls this periodically
-            self._progress_state[file_name] = (pct, text)
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {}
-            for path, config in files.items():
-                f = pool.submit(process_file, config, output_folder, progress_cb)
-                futures[f] = config
-
-            for f in as_completed(futures):
-                config = futures[f]
-                try:
-                    f.result()
-                except Exception as exc:
-                    config.status = "Error"
-                    config.error_message = str(exc)
-                    self._progress_state[config.file_name] = (0.0, "Error")
-
-        self.after(0, self._on_all_done)
 
     # ------------------------------------------------------------------
     # Throttled progress UI polling — reads shared dict every 200ms
     # ------------------------------------------------------------------
 
     def _start_progress_polling(self):
-        """Start a 200ms polling loop that reads _progress_state and updates UI."""
+        """Start a 200ms polling loop that reads progress and job state."""
         if not self._progress_poll_active:
             self._progress_poll_active = True
-            self._progress_state.clear()
             self.after(200, self._poll_progress)
 
     def _poll_progress(self):
-        """Read latest progress from background threads and update UI once."""
-        if not self._progress_state:
-            if self._processing:
-                self.after(200, self._poll_progress)
+        """Read latest progress from the queue worker and update UI."""
+        # 1. Read progress dict (same pattern as before)
+        if self._format_queue.progress_state:
+            snapshot = dict(self._format_queue.progress_state)
+            self._format_queue.progress_state.clear()
+
+            for file_name, (pct, text) in snapshot.items():
+                self._progress_panel.update_file(file_name, pct, text)
+                # Also update file list status
+                for p, c in self._files.items():
+                    if c.file_name == file_name:
+                        self._file_list.update_file_status(p, text)
+                        break
+
+        # 2. Sync per-file button states from job statuses
+        for job in self._format_queue.get_all_jobs():
+            path = job.job_id
+            if job.status == "processing":
+                self._file_list.set_file_buttons_state(path, "processing")
+            elif job.status == "queued":
+                self._file_list.set_file_buttons_state(path, "queued")
+            elif job.status in ("done", "error"):
+                self._file_list.set_file_buttons_state(path, job.status)
+
+        # 3. Check if queue just became idle
+        if self._format_queue.is_idle() and not self._idle_notified:
+            self._idle_notified = True
+            self.after(0, self._on_queue_idle)
+            self._progress_poll_active = False
             return
 
-        # Snapshot and clear
-        snapshot = dict(self._progress_state)
-        self._progress_state.clear()
-
-        for file_name, (pct, text) in snapshot.items():
-            self._progress_panel.update_file(file_name, pct, text)
-            for p, c in self._files.items():
-                if c.file_name == file_name:
-                    self._file_list.update_file_status(p, text)
-                    break
-
-        if self._processing:
+        # Keep polling while work remains
+        if not self._format_queue.is_idle():
             self.after(200, self._poll_progress)
         else:
             self._progress_poll_active = False
 
-    def _on_all_done(self):
-        # Flush any remaining progress writes
-        self._progress_state.clear()
-        self._progress_poll_active = False
-        self._processing = False
+    def _on_queue_idle(self):
+        """Called when the formatting queue has drained."""
+        completed = self._format_queue.pop_completed()
+        if not completed:
+            return
 
-        # Set final status from config (not from progress dict — avoids race)
-        for p, c in self._files.items():
-            if c.status in ("Done", "Error"):
-                self._file_list.update_file_status(p, c.status)
-                self._progress_panel.update_file(c.file_name, c.progress, c.status)
+        # Update final statuses from completed jobs
+        for job in completed:
+            path = job.job_id
+            config = job.config
+            status = "Done" if job.status == "done" else "Error"
+            self._file_list.update_file_status(path, status)
+            self._file_list.set_file_buttons_state(path, job.status)
+            self._progress_panel.update_file(
+                config.file_name,
+                1.0 if job.status == "done" else 0.0,
+                status,
+            )
 
-        self._format_btn.configure(state="normal")
-        self._file_list.set_buttons_enabled(True)
-        done = sum(1 for c in self._files.values() if c.status == "Done")
-        errors = sum(1 for c in self._files.values() if c.status == "Error")
+        done = sum(1 for j in completed if j.status == "done")
+        errors = sum(1 for j in completed if j.status == "error")
         msg = f"Formatting complete: {done} succeeded"
         if errors:
             msg += f", {errors} failed"

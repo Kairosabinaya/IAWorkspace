@@ -108,13 +108,14 @@ class FileListPanel(ctk.CTkFrame):
         cfg_btn.pack(side="left", padx=2)
 
         # Remove button
-        ctk.CTkButton(
+        remove_btn = ctk.CTkButton(
             row, text="X", width=32, height=28,
             font=(theme.FONT_FAMILY, 16),
             fg_color="transparent", hover_color=theme.ERROR_RED,
             text_color=theme.TEXT_SECONDARY,
             command=lambda fp=config.file_path: self._on_remove(fp),
-        ).pack(side="left", padx=(0, 6))
+        )
+        remove_btn.pack(side="left", padx=(0, 6))
 
         # Store references
         row._status_label = status_lbl
@@ -122,6 +123,7 @@ class FileListPanel(ctk.CTkFrame):
         row._col_summary_label = col_summary_lbl
         row._format_btn = fmt_btn
         row._config_btn = cfg_btn
+        row._remove_btn = remove_btn
         self._file_rows[config.file_path] = row
 
     def update_file_status(self, file_path: str, status: str):
@@ -149,6 +151,32 @@ class FileListPanel(ctk.CTkFrame):
         for row in self._file_rows.values():
             row._format_btn.configure(state=state)
             row._config_btn.configure(state=state)
+
+    def set_file_buttons_state(self, file_path: str, state: str):
+        """Set button states for a specific file row.
+
+        state: "ready" | "queued" | "processing" | "done" | "error" | "analyzing"
+        """
+        row = self._file_rows.get(file_path)
+        if not row:
+            return
+
+        if state in ("ready", "done", "error"):
+            row._format_btn.configure(state="normal", text="Format")
+            row._config_btn.configure(state="normal")
+            row._remove_btn.configure(state="normal")
+        elif state == "queued":
+            row._format_btn.configure(state="disabled", text="Queued")
+            row._config_btn.configure(state="disabled")
+            row._remove_btn.configure(state="normal")  # Can cancel from queue
+        elif state == "processing":
+            row._format_btn.configure(state="disabled", text="Formatting...")
+            row._config_btn.configure(state="disabled")
+            row._remove_btn.configure(state="disabled")
+        elif state == "analyzing":
+            row._format_btn.configure(state="disabled", text="Format")
+            row._config_btn.configure(state="disabled")
+            row._remove_btn.configure(state="normal")
 
     @staticmethod
     def _build_column_summary(config: FileConfig) -> str:
